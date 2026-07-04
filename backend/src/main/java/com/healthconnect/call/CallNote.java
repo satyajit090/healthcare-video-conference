@@ -2,6 +2,7 @@ package com.healthconnect.call;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 
@@ -17,6 +18,6 @@ public class CallNote {
     private String authorName;
     @Column(length = 4000, nullable = false)
     private String text;
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
 }

@@ -2,6 +2,7 @@ package com.healthconnect.schedule;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 
@@ -36,6 +37,6 @@ public class ScheduledCall {
     private boolean reminded24h = false;
     private boolean reminded1h = false;
 
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
 }

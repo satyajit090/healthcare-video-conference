@@ -2,7 +2,7 @@ package com.healthconnect.provider;
 
 import jakarta.persistence.*;
 import lombok.*;
-
+import org.hibernate.annotations.CreationTimestamp;
 import java.time.Instant;
 
 @Entity
@@ -34,6 +34,6 @@ public class VideoProvider {
     private String lastTestStatus;   // OK / FAILED / UNTESTED
     private Instant lastTestedAt;
 
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
 }

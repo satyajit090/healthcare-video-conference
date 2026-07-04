@@ -2,6 +2,7 @@ package com.healthconnect.notification;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 
@@ -17,6 +18,6 @@ public class Notification {
     @Column(length = 1000)
     private String message;
     private boolean read = false;
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
 }

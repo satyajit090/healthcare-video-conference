@@ -3,6 +3,7 @@ package com.healthconnect.user;
 import com.healthconnect.common.Role;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 
@@ -41,6 +42,6 @@ public class User {
 
     private boolean senior = false; // senior staff for escalation
 
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
 }

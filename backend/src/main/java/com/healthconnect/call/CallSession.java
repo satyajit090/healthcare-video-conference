@@ -3,6 +3,7 @@ package com.healthconnect.call;
 import com.healthconnect.common.CallStatus;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 
@@ -48,8 +49,8 @@ public class CallSession {
     @Column(length = 4000)
     private String aiTriageSummary;    // Gemini-generated triage note
 
-    @Column(nullable = false)
-    private Instant createdAt = Instant.now();
+    @CreationTimestamp
+    private Instant createdAt;
     private Instant startedAt;
     private Instant endedAt;
     private Long durationSeconds;
