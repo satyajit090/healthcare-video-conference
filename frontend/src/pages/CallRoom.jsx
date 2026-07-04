@@ -4,8 +4,6 @@ import { api, getUser } from '../lib/api.js';
 import { createStompClient } from '../lib/ws.js';
 import { Modal } from './Dashboard.jsx';
 
-// Public STUN servers are enough for most networks. A TURN server can be added
-// here later for users behind strict/symmetric NATs.
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 export default function CallRoom() {
@@ -32,6 +30,7 @@ export default function CallRoom() {
   const remoteDescSet = useRef(false);
   const initiator = useRef(false);
   const offered = useRef(false);
+  const endedRef = useRef(false);
 
   const send = useCallback((type, payload) => {
     if (!client.current?.connected) return;
@@ -41,7 +40,6 @@ export default function CallRoom() {
     });
   }, [roomId, me.userId, me.fullName]);
 
-  // ---- create peer connection ----
   const buildPc = useCallback(() => {
     const peer = new RTCPeerConnection(ICE);
     peer.onicecandidate = (e) => { if (e.candidate) send('ice', e.candidate); };
@@ -62,8 +60,6 @@ export default function CallRoom() {
   }, [send]);
 
   const makeOffer = useCallback(async () => {
-    // Only the initiator creates an offer, and only once (guards against the
-    // hello/hello-ack handshake triggering a duplicate negotiation).
     if (offered.current) return;
     if (pc.current.signalingState !== 'stable') return;
     offered.current = true;
@@ -74,12 +70,17 @@ export default function CallRoom() {
     } catch (e) { offered.current = false; console.error('offer failed', e); }
   }, [send]);
 
-  // ---- handle a signaling message ----
+  const flushIce = useCallback(async () => {
+    for (const c of pendingIce.current) {
+      try { await pc.current.addIceCandidate(c); } catch (e) { console.error(e); }
+    }
+    pendingIce.current = [];
+  }, []);
+
   const onSignal = useCallback(async (msg) => {
-    if (msg.fromUserId === me.userId) return; // ignore our own echoes
+    if (msg.fromUserId === me.userId) return;
 
     if (msg.type === 'hello') {
-      // Someone joined. Acknowledge so both sides know the peer is present.
       send('hello-ack', null);
       if (initiator.current) makeOffer();
     } else if (msg.type === 'hello-ack') {
@@ -106,18 +107,11 @@ export default function CallRoom() {
       setRemoteJoined(false);
       setStatus('The other participant left');
     }
-  }, [me.userId, send, makeOffer]);
+  }, [me.userId, send, makeOffer, flushIce]);
 
-  async function flushIce() {
-    for (const c of pendingIce.current) {
-      try { await pc.current.addIceCandidate(c); } catch (e) { console.error(e); }
-    }
-    pendingIce.current = [];
-  }
-
-  // ---- setup on mount ----
   useEffect(() => {
     let cancelled = false;
+
     (async () => {
       let callData;
       try {
@@ -129,13 +123,11 @@ export default function CallRoom() {
         return;
       }
 
-      // Decide who initiates: the peer with the smaller userId creates the offer.
-      // The "other" id is whichever of patient/support is not me.
       const otherId = me.userId === callData.patientId ? callData.supportId : callData.patientId;
       initiator.current = otherId == null ? false : me.userId < otherId;
 
-      // Mark the call active (first participant to connect flips REQUESTED/RINGING → ACTIVE).
-      api.post(`/calls/${callData.id}/active`).catch(() => {});
+      // DO NOT mark active here — only mark active when both peers are in the room
+      // The support user accepting the call handles status transitions
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -162,23 +154,26 @@ export default function CallRoom() {
 
     return () => {
       cancelled = true;
-      try { send('bye', null); } catch { /* ignore */ }
-      try { client.current?.deactivate(); } catch { /* ignore */ }
-      try { pc.current?.close(); } catch { /* ignore */ }
+      // Cleanup media and connections only — do NOT call the end API here
+      // to avoid marking calls as COMPLETED on component unmount/remount
+      try { send('bye', null); } catch { }
+      try { client.current?.deactivate(); } catch { }
+      try { pc.current?.close(); } catch { }
       localStream.current?.getTracks().forEach(t => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  // ---- controls ----
   function toggleMic() {
     const track = localStream.current?.getAudioTracks()[0];
     if (track) { track.enabled = !track.enabled; setMicOn(track.enabled); }
   }
+
   function toggleCam() {
     const track = camTrack.current;
     if (track) { track.enabled = !track.enabled; setCamOn(track.enabled); }
   }
+
   async function toggleShare() {
     const sender = pc.current?.getSenders().find(s => s.track && s.track.kind === 'video');
     if (!sharing) {
@@ -194,6 +189,7 @@ export default function CallRoom() {
       stopShare(sender);
     }
   }
+
   async function stopShare(sender) {
     await sender?.replaceTrack(camTrack.current);
     if (localVideo.current) localVideo.current.srcObject = localStream.current;
@@ -201,14 +197,22 @@ export default function CallRoom() {
   }
 
   async function endCall() {
+    // Guard against double-firing (e.g. button clicked twice, or cleanup + click)
+    if (endedRef.current) return;
+    endedRef.current = true;
+    setEnded(true);
+
     try { await api.post(`/calls/${call.id}/end`); } catch { /* ignore */ }
     send('bye', null);
-    try { client.current?.deactivate(); } catch { /* ignore */ }
-    try { pc.current?.close(); } catch { /* ignore */ }
+    try { client.current?.deactivate(); } catch { }
+    try { pc.current?.close(); } catch { }
     localStream.current?.getTracks().forEach(t => t.stop());
-    setEnded(true);
-    if (me.role === 'PATIENT') setShowRate(true);
-    else nav('/history');
+
+    if (me.role === 'PATIENT') {
+      setShowRate(true);
+    } else {
+      nav('/history');
+    }
   }
 
   return (
@@ -222,7 +226,11 @@ export default function CallRoom() {
           <div className="video-tile">
             <video ref={remoteVideo} autoPlay playsInline />
             <span className="label">
-              {call ? (me.userId === call.patientId ? (call.supportName || 'Specialist') : call.patientName) : 'Peer'}
+              {call
+                ? (me.userId === call.patientId
+                    ? (call.supportName || 'Specialist')
+                    : call.patientName)
+                : 'Peer'}
               {!remoteJoined && ' (waiting…)'}
             </span>
           </div>
@@ -238,8 +246,9 @@ export default function CallRoom() {
           <button className={`ctrl ${sharing ? 'off' : 'active'}`} onClick={toggleShare} title="Share screen">
             🖥️
           </button>
-          <button className="ctrl end" onClick={endCall}>End call</button>
+          <button className="ctrl end" onClick={endCall} disabled={ended}>End call</button>
         </div>
+
         <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: 10, fontSize: 13 }}>
           {ended ? 'Call ended.' : status}
           {call?.recordingConsent && !ended && ' · 🔴 recording consented'}
@@ -248,23 +257,25 @@ export default function CallRoom() {
 
       <SidePanel call={call} roomId={roomId} me={me} />
 
-      {showRate && <RateModal callId={call.id}
-        onDone={() => nav('/history')} />}
+      {showRate && (
+        <RateModal callId={call.id} onDone={() => nav('/history')} />
+      )}
     </div>
   );
 }
 
-/* ---------------- side panel: chat / notes / AI ---------------- */
 function SidePanel({ call, roomId, me }) {
   const [tab, setTab] = useState('chat');
   return (
     <div className="sidepanel">
       <div className="tabs">
         <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>Chat</button>
-        {me.role === 'SUPPORT' &&
-          <button className={tab === 'notes' ? 'active' : ''} onClick={() => setTab('notes')}>Notes</button>}
-        {me.role === 'SUPPORT' &&
-          <button className={tab === 'ai' ? 'active' : ''} onClick={() => setTab('ai')}>AI Assist</button>}
+        {me.role === 'SUPPORT' && (
+          <button className={tab === 'notes' ? 'active' : ''} onClick={() => setTab('notes')}>Notes</button>
+        )}
+        {me.role === 'SUPPORT' && (
+          <button className={tab === 'ai' ? 'active' : ''} onClick={() => setTab('ai')}>AI Assist</button>
+        )}
       </div>
       {tab === 'chat' && <ChatTab roomId={roomId} me={me} />}
       {tab === 'notes' && <NotesTab call={call} />}
@@ -281,18 +292,23 @@ function ChatTab({ roomId, me }) {
   useEffect(() => {
     const c = createStompClient(() => {
       c.subscribe(`/topic/chat/${roomId}`, (frame) => {
-        try { setMsgs(prev => [...prev, JSON.parse(frame.body)]); } catch { /* ignore */ }
+        try { setMsgs(prev => [...prev, JSON.parse(frame.body)]); } catch { }
       });
     });
     client.current = c;
-    return () => { try { c.deactivate(); } catch { /* ignore */ } };
+    return () => { try { c.deactivate(); } catch { } };
   }, [roomId]);
 
   function sendMsg() {
     if (!text.trim() || !client.current?.connected) return;
     client.current.publish({
       destination: `/app/chat/${roomId}`,
-      body: JSON.stringify({ fromUserId: me.userId, fromName: me.fullName, text, sentAt: new Date().toISOString() }),
+      body: JSON.stringify({
+        fromUserId: me.userId,
+        fromName: me.fullName,
+        text,
+        sentAt: new Date().toISOString(),
+      }),
     });
     setText('');
   }
@@ -308,8 +324,12 @@ function ChatTab({ roomId, me }) {
         ))}
       </div>
       <div className="panel-foot">
-        <input value={text} onChange={e => setText(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && sendMsg()} placeholder="Type a message…" />
+        <input
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && sendMsg()}
+          placeholder="Type a message…"
+        />
         <button className="btn sm" onClick={sendMsg}>Send</button>
       </div>
     </>
@@ -322,16 +342,21 @@ function NotesTab({ call }) {
 
   async function load() {
     if (!call) return;
-    try { const d = await api.get(`/calls/${call.id}`); setNotes(d.notes); } catch { /* ignore */ }
+    try {
+      const d = await api.get(`/calls/${call.id}`);
+      setNotes(d.notes);
+    } catch { }
   }
+
   useEffect(() => { load(); }, [call]);
 
   async function add() {
     if (!text.trim()) return;
     try {
       await api.post(`/calls/${call.id}/notes`, { text });
-      setText(''); load();
-    } catch { /* ignore */ }
+      setText('');
+      load();
+    } catch { }
   }
 
   return (
@@ -348,8 +373,12 @@ function NotesTab({ call }) {
         ))}
       </div>
       <div className="panel-foot">
-        <input value={text} onChange={e => setText(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && add()} placeholder="Add a private note…" />
+        <input
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && add()}
+          placeholder="Add a private note…"
+        />
         <button className="btn sm" onClick={add}>Save</button>
       </div>
     </>
@@ -363,31 +392,43 @@ function AiTab({ call }) {
 
   async function ask() {
     if (!prompt.trim()) return;
-    setBusy(true); setAnswer('');
+    setBusy(true);
+    setAnswer('');
     try {
-      const res = await api.post('/ai/assist',
-        { prompt, context: call ? `${call.caseType}: ${call.reason}` : '' });
+      const res = await api.post('/ai/assist', {
+        prompt,
+        context: call ? `${call.caseType}: ${call.reason}` : '',
+      });
       setAnswer(res.response);
-    } catch (e) { setAnswer('AI error: ' + e.message); } finally { setBusy(false); }
+    } catch (e) {
+      setAnswer('AI error: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <>
       <div className="panel-body">
-        <p className="muted">Ask the AI assistant for phrasing help, follow-up questions or resources. Non-diagnostic.</p>
+        <p className="muted">
+          Ask the AI assistant for phrasing help, follow-up questions or resources. Non-diagnostic.
+        </p>
         {answer && <div className="bubble">{answer}</div>}
         {busy && <p className="muted">Thinking…</p>}
       </div>
       <div className="panel-foot">
-        <input value={prompt} onChange={e => setPrompt(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && ask()} placeholder="e.g. Suggest calming breathing steps" />
+        <input
+          value={prompt}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && ask()}
+          placeholder="e.g. Suggest calming breathing steps"
+        />
         <button className="btn sm" onClick={ask} disabled={busy}>Ask</button>
       </div>
     </>
   );
 }
 
-/* ---------------- rating modal ---------------- */
 function RateModal({ callId, onDone }) {
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
@@ -395,7 +436,7 @@ function RateModal({ callId, onDone }) {
 
   async function submit() {
     setBusy(true);
-    try { await api.post(`/calls/${callId}/rate`, { rating, comment }); } catch { /* ignore */ }
+    try { await api.post(`/calls/${callId}/rate`, { rating, comment }); } catch { }
     onDone();
   }
 
@@ -407,12 +448,22 @@ function RateModal({ callId, onDone }) {
         ))}
       </div>
       <label>Comments (optional)</label>
-      <textarea value={comment} onChange={e => setComment(e.target.value)}
-        placeholder="Tell us about your experience…" />
+      <textarea
+        value={comment}
+        onChange={e => setComment(e.target.value)}
+        placeholder="Tell us about your experience…"
+      />
       <div className="row" style={{ marginTop: 16, justifyContent: 'flex-end' }}>
-        <button className="btn ghost" style={{ border: '1px solid var(--line)', color: 'var(--ink)' }}
-          onClick={onDone}>Skip</button>
-        <button className="btn" onClick={submit} disabled={busy || rating === 0}>Submit</button>
+        <button
+          className="btn ghost"
+          style={{ border: '1px solid var(--line)', color: 'var(--ink)' }}
+          onClick={onDone}
+        >
+          Skip
+        </button>
+        <button className="btn" onClick={submit} disabled={busy || rating === 0}>
+          Submit
+        </button>
       </div>
     </Modal>
   );
